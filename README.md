@@ -3,16 +3,27 @@
 > Toyni was migrated from [jonas089's Github](https://github.com/jonas089/Toyni)
 > Click [here](https://github.com/jonas089/Toyni) to see the past commit history.
 
-Welcome to Toyni! This is an implementation of a STARK (Scalable Transparent Argument of Knowledge) proving system in Rust. While it's not yet a full zero-knowledge STARK, it provides a solid foundation for understanding how STARKs work.
-
+Welcome to Toyni! This is an implementation of a STARK (Scalable Transparent Argument of Knowledge) proving system in Rust.
 
 ![toyniii](art/toyniii.jpg)
 
 Meet the amazing artist behind this creation, [Kristiana Skrastina](https://www.linkedin.com/in/kristiana-skrastina/)
 
-
 > [!WARNING]  
 > This is a research project and hasn't been audited. Use at your own risk.
+> There are some essential and critical features still missing, especially the
+> trace commitment with merkle proof verifications.
+> This codebase is not complete by any means and an active work in progress.
+
+## Work in Progress
+Currently working on masked trace commitments for zero-knowledge spot checks. This is critical to the security of the protocol.
+My understanding of this is:
+
+1. interpolate the trace colums as polynomials
+2. evaluate the trace column polynomials over the extended domain
+3. interpolate the constraint polys from the original domain (tbd: random linear combinations) and sum them to get the composite constraint poly
+4. check that C(X) = Z(X) * Q(X) (Q from the original domain) for X -> T(s) -> T + Z * r, where s is the spot check
+from the extended domain
 
 ## 0. Background, STARK Verifier: Constraint vs FRI Layer Checks
 
@@ -23,10 +34,6 @@ Meet the amazing artist behind this creation, [Kristiana Skrastina](https://www.
     Q(x) * Z(x) == C(x)
     ```
   - Ensures that the execution trace satisfies all constraints
-  - **This check is done once per point**
-  - **Not done across layers**
-  - Merkle proof is optional (depends on how C(x) and Q(x) are committed)
-
 ---
 
 ## ✅ FRI Layer Checks (Multiple Layers)
@@ -78,9 +85,18 @@ This involves carefully choosing parameters for:
 - Constraint checks (`Q(x)` evaluations)
 - FRI protocol (number of layers and queries per layer)
 
-> Example:
-> - If `L = 20` layers → `log₂(20) ≈ 4.3`
-> - Then: `m ≈ 133` queries per layer
+**Important**: The number of FRI layers depends on the program size!
+
+> Example for different program sizes:
+> - Trace size N=4: Extended domain = 32 → L = 4 layers → log₂(4) ≈ 2
+> - Trace size N=8: Extended domain = 64 → L = 5 layers → log₂(5) ≈ 2.3  
+> - Trace size N=16: Extended domain = 128 → L = 6 layers → log₂(6) ≈ 2.6
+> - Trace size N=32: Extended domain = 256 → L = 7 layers → log₂(7) ≈ 2.8
+> - Trace size N=1024: Extended domain = 8192 → L = 11 layers → log₂(11) ≈ 3.5
+>
+> **Formula**: FRI layers = log₂(8N) - 2, where N is trace size
+> **Required queries**: m ≥ log₂(L) + 128 (e.g., 131-132 for most programs)
+
 ---
 
 ### CONSTRAINT CHECKS
@@ -100,9 +116,11 @@ Use `n = 64–80` spot checks for strong 128-bit soundness across typical domain
 | Component              | Suggested Value                    |
 |-----------------------|------------------------------------|
 | Constraint checks `n` | 64–80                              |
-| FRI layers `L`        | log₂(N / degree of final poly)     |
-| FRI queries `m`       | ≥ log₂(L) + 128 (e.g., 133)        |
+| FRI layers `L`        | log₂(8N) - 2 (where N = trace size) |
+| FRI queries `m`       | ≥ log₂(L) + 128 (e.g., 131-132)     |
 | Total soundness error | ε_total = ε_constraints + ε_fri ≤ 2⁻¹²⁸ |
+
+**Note**: Our implementation uses a conservative approach by checking ALL points in each FRI layer rather than sampling, providing security well above the minimum requirements.
 
 ## 🔁 Summary
 
@@ -139,8 +157,25 @@ At its heart, Toyni consists of three main components working together:
 
 | Virtual Machine | Constraint System | STARK Prover |
 |----------------|-------------------|--------------|
-| • Executes programs | • Defines rules | • Generates proofs |
-| • Creates traces | • Validates states | • Uses FRI protocol |
+| •  | • Defines rules | • Generates proofs |
+| • | • Validates states | • Uses FRI protocol |
+
+### FRI Layer Scaling
+
+The number of FRI layers in a STARK proof scales logarithmically with the program size:
+
+```
+FRI Layers = log₂(8N) - 2
+```
+
+Where `N` is the trace size (number of execution steps). This scaling ensures that:
+
+- **Small programs** (N=4): 4 FRI layers
+- **Medium programs** (N=32): 7 FRI layers  
+- **Large programs** (N=1024): 11 FRI layers
+- **Very large programs** (N=65536): 16 FRI layers
+
+This logarithmic scaling is crucial for STARK's efficiency - proof size grows only logarithmically with computation size.
 
 ### 5. How It Works
 
@@ -161,13 +196,13 @@ fn test_valid_proof() {
         trace.insert_column(row);
     }
 
-    let mut constraints = ConstraintSystem::new();
+    let mut constraints = ConstraintSystem::default();
     constraints.add_transition_constraint(
         "increment".to_string(),
         vec!["x".to_string()],
         Box::new(|current, next| {
-            let x_n = Fr::from(*current.get("x").unwrap() as u64);
-            let x_next = Fr::from(*next.get("x").unwrap() as u64);
+            let x_n = Fr::from(*current.get("x").unwrap());
+            let x_next = Fr::from(*next.get("x").unwrap());
             x_next - x_n - Fr::ONE
         }),
     );
@@ -175,10 +210,10 @@ fn test_valid_proof() {
         "starts_at_0".to_string(),
         0,
         vec!["x".to_string()],
-        Box::new(|row| Fr::from(*row.get("x").unwrap() as u64)),
+        Box::new(|row| Fr::from(*row.get("x").unwrap())),
     );
 
-    let prover = StarkProver::new(&trace, &constraints);
+    let prover = StarkProver::new(trace.clone(), constraints);
     let proof = prover.generate_proof();
     let verifier = StarkVerifier::new(trace.height as usize);
     assert!(verifier.verify(&proof));
@@ -198,9 +233,9 @@ STARKs achieve their security through a combination of domain extension and low-
 
 The security of a STARK proof relies on two key mechanisms:
 
-1. **Domain Extension (Blowup)**: The composition polynomial is evaluated over a domain that's `b` times larger than the original trace length, where `b` is the blowup factor.
+1. **Domain Extension (Blowup)**: The composition polynomial is evaluated over a domain that's `b` times larger than the original trace length, where `b` is the blowup factor (8 in our implementation).
 
-2. **Low-Degree Testing**: The FRI protocol ensures that the polynomial being tested is close to a valid low-degree polynomial.
+2. **Low-Degree Testing**: The FRI protocol ensures that the polynomial being tested is close to a valid low-degree polynomial. The number of FRI layers scales logarithmically with program size: `L = log₂(8N) - 2` where N is the trace size.
 
 The soundness error (probability of accepting an invalid proof) is bounded by:
 
@@ -209,10 +244,12 @@ Pr[undetected cheat] = (1/b)^q
 ```
 
 where:
-- `b` is the blowup factor (e.g., 8 in our example)
+- `b` is the blowup factor (8 in our implementation)
 - `q` is the number of queries made by the verifier
 
-This means that if a prover tries to cheat by modifying a fraction 1/b of the domain, the verifier will detect this with probability at least 1 - (1/b)^q. For example, with a blowup factor of 8 and 10 queries, the soundness error is at most (1/8)^10 ≈ 0.0000001.
+This means that if a prover tries to cheat by modifying a fraction 1/b of the domain, the verifier will detect this with probability at least 1 - (1/b)^q. 
+
+**Example**: With a blowup factor of 8 and 80 constraint queries, the constraint soundness error is at most (1/8)^80 ≈ 2^(-240), providing far more than the required 128-bit security.
 
 ## 7. Project Structure
 
@@ -234,20 +271,21 @@ The codebase is organized into logical components:
 | • Boundary constraints | • Interactive verification | • Field operations |
 | • Quotient verification | • FRI folding layers | • Domain operations |
 | • Merkle commitments | • Folding consistency checks | • Secure commitments |
-| • Trace Privacy | | |
+| • Trace Privacy | • Fiat Shamir verifier challenges | • Conservative FRI verification |
+
+**Security Note**: Our FRI implementation uses a conservative approach by verifying ALL points in each layer rather than sampling, providing security well above the theoretical minimum requirements.
 
 ### 9. Missing Components
 
-| Zero-Knowledge | Fiat-Shamir Transform | Performance |
-|----------------|----------------------|-------------|
-| • Deterministic hashing | • GPU Acceleration | • IFFT for interpolation |
-| • State protection | • Non-interactive proofs | • No dependency on arkworks |
+| Zero-Knowledge | Performance | Optimization |
+|----------------|-------------|--------------|
+| • Enhanced state protection | • GPU Acceleration | • IFFT for interpolation |
+| • Deterministic hashing | • Non-interactive proofs | • No dependency on arkworks |
 
-While we have a working STARK implementation with quotient polynomial verification and FRI folding, there are still some components to implement:
+While we have a working STARK implementation with quotient polynomial verification, FRI folding, and basic zero-knowledge properties, there are still some components to implement:
 
-1. **Fiat-Shamir Transform**: Currently using random number generation instead of deterministic hashing, making the protocol interactive.
-2. **Performance Optimizations**: Need to implement parallel processing and batch verification for better scalability.
-3. **Circuit-Specific Features**: Add support for specialized circuits and optimizations.
+1. **Performance Optimizations**: Need to implement parallel processing and batch verification for better scalability.
+2. **Circuit-Specific Features**: Add support for specialized circuits and optimizations.
 
 ### 10. Roadmap
 
@@ -257,14 +295,15 @@ While we have a working STARK implementation with quotient polynomial verificati
 - Merkle commitments for FRI layers
 - Folding consistency verification
 - Interactive verification protocol
+- Fiat-Shamir transform implementation
+- Zero-knowledge polynomial masking
 
 #### In Progress 🚧
-- Fiat-Shamir transform implementation
 - Performance optimizations
 - Circuit-specific optimizations
 
 #### Future Work 📅
-- Zero-knowledge enhancements
+- Enhanced zero-knowledge properties
 - Parallel processing support
 - Batch verification
 - Circuit-specific optimizations
@@ -302,9 +341,9 @@ This means that if a prover tries to cheat by modifying a fraction 1/b of the do
 
 ## 12. Contributing
 
-We welcome contributions to Toyni! Our current focus is on implementing zero-knowledge properties and improving the overall system. We're particularly interested in:
+We welcome contributions to Toyni! Our current focus is on enhancing zero-knowledge properties and improving the overall system. We're particularly interested in:
 
-1. Implementing Merkle tree commitments and the Fiat-Shamir transform
+1. Enhancing zero-knowledge properties and state protection
 2. Adding comprehensive test coverage and security audits
 3. Improving documentation and adding more examples
 4. Optimizing performance and reducing proof sizes
