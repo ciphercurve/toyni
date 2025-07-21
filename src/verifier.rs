@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+
 use ark_bls12_381::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use num_bigint::BigInt;
 
 use crate::{
-    digest_sha2, math::polynomial::Polynomial, merkle::verify_merkle_proof, prover::StarkProof,
+    digest_sha2, math::polynomial::Polynomial, merkle::verify_merkle_proof,
+    program::trace::ProgramVariable, prover::StarkProof,
 };
 
 /// STARK verifier component that verifies proofs.
@@ -44,9 +48,7 @@ impl StarkVerifier {
     /// `true` if the proof is valid, `false` otherwise
     pub fn verify(&self, proof: &StarkProof) -> bool {
         let domain = GeneralEvaluationDomain::<Fr>::new(self.trace_len).unwrap();
-        let _extended_domain = GeneralEvaluationDomain::<Fr>::new(self.trace_len * 8).unwrap();
         let z_poly = Polynomial::from_dense_poly(domain.vanishing_polynomial().into());
-
         // FRI folding consistency check with Merkle proof verification
         let mut current_layer = &proof.quotient_eval_domain;
         for (i, ((beta, next_layer), merkle_tree)) in proof
